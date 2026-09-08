@@ -155,7 +155,7 @@ export class GaugeCollector extends DurableObject {
             page: "page",
             idx: member.idx,
             pageid: "goal",
-            preset: "",
+            preset: "0",
           })}]`
         );
 
