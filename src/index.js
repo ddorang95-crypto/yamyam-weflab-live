@@ -645,18 +645,22 @@ export class GaugeCollector extends DurableObject {
         member.displayName,
       connections: SERVERS.map(
         (server) => {
-          const socket =
-            this.sockets.get(
-              `${member.name}:${server}`
-            );
+          const sockets = [...this.sockets.entries()]
+            .filter(([key]) =>
+              key.startsWith(`${member.name}:${server}:`)
+            )
+            .map(([, socket]) => socket);
+          const openSocket = sockets.find(
+            (socket) =>
+              socket.readyState === WebSocket.OPEN
+          );
 
           return {
             server,
-            connected:
-              socket?.readyState ===
-              WebSocket.OPEN,
+            connected: Boolean(openSocket),
             state:
-              socket?.readyState ??
+              openSocket?.readyState ??
+              sockets[0]?.readyState ??
               "not-started",
           };
         }
