@@ -6,6 +6,7 @@ const MEMBERS = [
     displayName: "야미",
     idx: "mNzL0s3DwWhrZXKAp52WpYI",
     afreecaId: "kisss2",
+    platform: "afreeca",
     mvpPreset: "2",
   },
   {
@@ -13,6 +14,7 @@ const MEMBERS = [
     displayName: "선하",
     idx: "mNzL0s3DwWFsZGuAp52WpYI",
     afreecaId: "ols3",
+    platform: "afreeca",
     mvpPreset: "0",
   },
   {
@@ -20,6 +22,15 @@ const MEMBERS = [
     displayName: "도릿",
     idx: "mNzL0s3DwWdsZG2Ap52WpYI",
     afreecaId: "chziaxz",
+    platform: "afreeca",
+    mvpPreset: "0",
+  },
+  {
+    name: "anonymous",
+    displayName: "익명",
+    idx: "mNzL0s3DwWFrZWpWr8SWpJGbUQ",
+    afreecaId: "UC-C8YE-QVl4P92I4j7XssCQ",
+    platform: "youtube",
     mvpPreset: "0",
   },
 ];
@@ -27,6 +38,7 @@ const MEMBERS = [
 const SERVERS = [
   "ssmain.weflab.com",
   "ssafreeca.weflab.com",
+  "ssyoutube.weflab.com",
 ];
 
 const EMPTY_GAUGES = {
@@ -45,12 +57,18 @@ const EMPTY_GAUGES = {
     weflab: 0,
     updatedAt: null,
   },
+  anonymous: {
+    displayName: "익명",
+    weflab: 0,
+    updatedAt: null,
+  },
 };
 
 const EMPTY_MVP_ROOMS = {
   yami: {},
   seonha: {},
   dorit: {},
+  anonymous: {},
 };
 
 export class GaugeCollector extends DurableObject {
@@ -78,17 +96,15 @@ export class GaugeCollector extends DurableObject {
             "donationKeys"
           )) || [];
 
-        this.gauges =
-          (await this.ctx.storage.get(
-            "gauges"
-          )) ||
-          structuredClone(EMPTY_GAUGES);
+        this.gauges = {
+          ...structuredClone(EMPTY_GAUGES),
+          ...((await this.ctx.storage.get("gauges")) || {}),
+        };
 
-        this.mvpRooms =
-          (await this.ctx.storage.get(
-            "mvpRooms"
-          )) ||
-          this.rebuildMvpFromEvents();
+        this.mvpRooms = {
+          ...structuredClone(EMPTY_MVP_ROOMS),
+          ...((await this.ctx.storage.get("mvpRooms")) || this.rebuildMvpFromEvents()),
+        };
 
         this.startedAt =
           (await this.ctx.storage.get(
@@ -154,10 +170,7 @@ export class GaugeCollector extends DurableObject {
       return this.json({
         success: true,
         gauges: this.gauges,
-        total:
-          this.gauges.yami.weflab +
-          this.gauges.seonha.weflab +
-          this.gauges.dorit.weflab,
+        total: MEMBERS.reduce((sum, member) => sum + (this.gauges[member.name]?.weflab || 0), 0),
         connections: this.connectionStatus(),
       });
     }
@@ -197,10 +210,7 @@ export class GaugeCollector extends DurableObject {
         "YAMYAM 실시간 게이지 수집기 작동 중",
       startedAt: this.startedAt,
       gauges: this.gauges,
-      total:
-        this.gauges.yami.weflab +
-        this.gauges.seonha.weflab +
-        this.gauges.dorit.weflab,
+      total: MEMBERS.reduce((sum, member) => sum + (this.gauges[member.name]?.weflab || 0), 0),
       connections: this.connectionStatus(),
       gaugeUrl: `${url.origin}/gauges`,
       eventsUrl: `${url.origin}/events`,
@@ -242,7 +252,7 @@ export class GaugeCollector extends DurableObject {
 
     for (const member of MEMBERS) {
       const channels = [
-        ...SERVERS.map((server) => ({
+        ...SERVERS.filter((server) => server === "ssmain.weflab.com" || server === `ss${member.platform || "afreeca"}.weflab.com`).map((server) => ({
           server,
           pageid: "goal",
           preset: "0",
@@ -314,10 +324,10 @@ export class GaugeCollector extends DurableObject {
 
         const joinData =
           server ===
-          "ssafreeca.weflab.com"
+          `ss${member.platform || "afreeca"}.weflab.com`
             ? {
                 type: "join_platform",
-                platform: "afreeca",
+                platform: member.platform || "afreeca",
                 id: member.afreecaId,
                 page: "page",
                 idx: member.idx,
