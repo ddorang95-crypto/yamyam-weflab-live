@@ -26,6 +26,24 @@ const SERVERS = [
   "ssafreeca.weflab.com",
 ];
 
+const EMPTY_GAUGES = {
+  yami: {
+    displayName: "야미",
+    weflab: 0,
+    updatedAt: null,
+  },
+  seonha: {
+    displayName: "선하",
+    weflab: 0,
+    updatedAt: null,
+  },
+  dorit: {
+    displayName: "도릿",
+    weflab: 0,
+    updatedAt: null,
+  },
+};
+
 export class GaugeCollector extends DurableObject {
   constructor(ctx, env) {
     super(ctx, env);
@@ -34,6 +52,8 @@ export class GaugeCollector extends DurableObject {
     this.env = env;
     this.sockets = new Map();
     this.events = [];
+    this.donationKeys = [];
+    this.gauges = structuredClone(EMPTY_GAUGES);
     this.startedAt = null;
 
     this.ready = this.ctx.blockConcurrencyWhile(
@@ -42,6 +62,17 @@ export class GaugeCollector extends DurableObject {
           (await this.ctx.storage.get(
             "recentEvents"
           )) || [];
+
+        this.donationKeys =
+          (await this.ctx.storage.get(
+            "donationKeys"
+          )) || [];
+
+        this.gauges =
+          (await this.ctx.storage.get(
+            "gauges"
+          )) ||
+          structuredClone(EMPTY_GAUGES);
 
         this.startedAt =
           (await this.ctx.storage.get(
@@ -74,6 +105,23 @@ export class GaugeCollector extends DurableObject {
       });
     }
 
+    if (
+      url.pathname === "/gauge" ||
+      url.pathname === "/gauges"
+    ) {
+      await this.startConnections();
+
+      return this.json({
+        success: true,
+        gauges: this.gauges,
+        total:
+          this.gauges.yami.weflab +
+          this.gauges.seonha.weflab +
+          this.gauges.dorit.weflab,
+        connections: this.connectionStatus(),
+      });
+    }
+
     if (url.pathname === "/events") {
       await this.startConnections();
 
@@ -81,6 +129,7 @@ export class GaugeCollector extends DurableObject {
         success: true,
         message: "최근 위플랩 수신 기록",
         events: this.events,
+        gauges: this.gauges,
         connections: this.connectionStatus(),
       });
     }
@@ -107,13 +156,14 @@ export class GaugeCollector extends DurableObject {
       message:
         "YAMYAM 실시간 게이지 수집기 작동 중",
       startedAt: this.startedAt,
-      members: MEMBERS.map((member) => ({
-        name: member.name,
-        displayName: member.displayName,
-      })),
+      gauges: this.gauges,
+      total:
+        this.gauges.yami.weflab +
+        this.gauges.seonha.weflab +
+        this.gauges.dorit.weflab,
       connections: this.connectionStatus(),
-      recentEventCount: this.events.length,
-      checkEvents: `${url.origin}/events`,
+      gaugeUrl: `${url.origin}/gauges`,
+      eventsUrl: `${url.origin}/events`,
     });
   }
 
@@ -243,12 +293,7 @@ export class GaugeCollector extends DurableObject {
 
           if (text.startsWith("0")) {
             socket.send("40");
-
-            setTimeout(
-              sendJoin,
-              150
-            );
-
+            setTimeout(sendJoin, 150);
             return;
           }
 
@@ -278,17 +323,12 @@ export class GaugeCollector extends DurableObject {
             }
 
             this.ctx.waitUntil(
-              this.recordEvent({
-                member: member.name,
-                displayName:
-                  member.displayName,
+              this.handleWeflabEvent(
+                member,
                 server,
-                kind: "weflab-event",
-                raw: text,
-                parsed,
-                receivedAt:
-                  new Date().toISOString(),
-              })
+                text,
+                parsed
+              )
             );
           }
         }
@@ -323,6 +363,95 @@ export class GaugeCollector extends DurableObject {
     }
   }
 
+  async handleWeflabEvent(
+    member,
+    server,
+    raw,
+    parsed
+  ) {
+    const payload =
+      Array.isArray(parsed)
+        ? parsed[1]
+        : null;
+
+    if (
+      payload &&
+      payload.type === "reset_page" &&
+      payload.pageid === "goal"
+    ) {
+      this.gauges[member.name].weflab = 0;
+      this.gauges[member.name].updatedAt =
+        new Date().toISOString();
+
+      await this.ctx.storage.put(
+        "gauges",
+        this.gauges
+      );
+    }
+
+    const donationData =
+      payload?.data || null;
+
+    const isDonation =
+      payload?.type === "test_donation" ||
+      payload?.type === "donation" ||
+      donationData?.type === "SENDBALLOON";
+
+    if (
+      isDonation &&
+      donationData
+    ) {
+      const value =
+        Number(donationData.value) || 0;
+
+      const donationKey = [
+        member.name,
+        donationData.platform || "",
+        donationData.time || "",
+        donationData.uid || "",
+        donationData.value || "",
+      ].join(":");
+
+      if (
+        value > 0 &&
+        !this.donationKeys.includes(
+          donationKey
+        )
+      ) {
+        this.donationKeys.unshift(
+          donationKey
+        );
+
+        this.donationKeys =
+          this.donationKeys.slice(0, 500);
+
+        this.gauges[member.name].weflab +=
+          value;
+
+        this.gauges[member.name].updatedAt =
+          new Date().toISOString();
+
+        await this.ctx.storage.put({
+          gauges: this.gauges,
+          donationKeys:
+            this.donationKeys,
+        });
+      }
+    }
+
+    await this.recordEvent({
+      member: member.name,
+      displayName:
+        member.displayName,
+      server,
+      kind: "weflab-event",
+      raw,
+      parsed,
+      receivedAt:
+        new Date().toISOString(),
+    });
+  }
+
   parseSocketEvent(text) {
     try {
       const packet =
@@ -336,7 +465,7 @@ export class GaugeCollector extends DurableObject {
           packet[1] =
             JSON.parse(packet[1]);
         } catch {
-          // 문자열은 그대로 저장합니다
+          // 문자열 그대로 보관
         }
       }
 
@@ -384,9 +513,12 @@ export class GaugeCollector extends DurableObject {
   }
 
   connectionStatus() {
-    return MEMBERS.map((member) => {
-      const connections =
-        SERVERS.map((server) => {
+    return MEMBERS.map((member) => ({
+      name: member.name,
+      displayName:
+        member.displayName,
+      connections: SERVERS.map(
+        (server) => {
           const socket =
             this.sockets.get(
               `${member.name}:${server}`
@@ -401,15 +533,9 @@ export class GaugeCollector extends DurableObject {
               socket?.readyState ??
               "not-started",
           };
-        });
-
-      return {
-        name: member.name,
-        displayName:
-          member.displayName,
-        connections,
-      };
-    });
+        }
+      ),
+    }));
   }
 
   corsHeaders() {
