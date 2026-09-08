@@ -44,6 +44,12 @@ const EMPTY_GAUGES = {
   },
 };
 
+const EMPTY_MVP_ROOMS = {
+  yami: {},
+  seonha: {},
+  dorit: {},
+};
+
 export class GaugeCollector extends DurableObject {
   constructor(ctx, env) {
     super(ctx, env);
@@ -54,6 +60,7 @@ export class GaugeCollector extends DurableObject {
     this.events = [];
     this.donationKeys = [];
     this.gauges = structuredClone(EMPTY_GAUGES);
+    this.mvpRooms = structuredClone(EMPTY_MVP_ROOMS);
     this.startedAt = null;
 
     this.ready = this.ctx.blockConcurrencyWhile(
@@ -74,6 +81,12 @@ export class GaugeCollector extends DurableObject {
           )) ||
           structuredClone(EMPTY_GAUGES);
 
+        this.mvpRooms =
+          (await this.ctx.storage.get(
+            "mvpRooms"
+          )) ||
+          this.rebuildMvpFromEvents();
+
         this.startedAt =
           (await this.ctx.storage.get(
             "startedAt"
@@ -92,6 +105,30 @@ export class GaugeCollector extends DurableObject {
         status: 204,
         headers: this.corsHeaders(),
       });
+    }
+
+    if (
+      url.pathname === "/live" &&
+      request.headers.get("Upgrade") ===
+        "websocket"
+    ) {
+      await this.startConnections();
+      const pair = new WebSocketPair();
+      const [client, server] =
+        Object.values(pair);
+      this.ctx.acceptWebSocket(server);
+      server.send(
+        JSON.stringify(this.snapshot("snapshot"))
+      );
+      return new Response(null, {
+        status: 101,
+        webSocket: client,
+      });
+    }
+
+    if (url.pathname === "/mvp") {
+      await this.startConnections();
+      return this.json(this.snapshot("snapshot"));
     }
 
     if (url.pathname === "/start") {
@@ -164,7 +201,21 @@ export class GaugeCollector extends DurableObject {
       connections: this.connectionStatus(),
       gaugeUrl: `${url.origin}/gauges`,
       eventsUrl: `${url.origin}/events`,
+      mvpUrl: `${url.origin}/mvp`,
+      liveUrl: `${url.origin.replace("http", "ws")}/live`,
     });
+  }
+
+  webSocketMessage(socket, message) {
+    if (message === "ping") socket.send("pong");
+  }
+
+  webSocketClose(socket) {
+    try { socket.close(); } catch {}
+  }
+
+  webSocketError(socket) {
+    try { socket.close(); } catch {}
   }
 
   async alarm() {
@@ -387,6 +438,13 @@ export class GaugeCollector extends DurableObject {
         "gauges",
         this.gauges
       );
+
+      this.mvpRooms[member.name] = {};
+      await this.ctx.storage.put(
+        "mvpRooms",
+        this.mvpRooms
+      );
+      this.broadcast(this.snapshot("snapshot"));
     }
 
     const donationData =
@@ -431,10 +489,50 @@ export class GaugeCollector extends DurableObject {
         this.gauges[member.name].updatedAt =
           new Date().toISOString();
 
+        const name = String(
+          donationData.uname ||
+          donationData.name ||
+          ""
+        ).trim();
+        const rawId = String(
+          donationData.uid ||
+          donationData.id ||
+          name
+        ).trim().toLowerCase();
+        let liveDonation = null;
+
+        if (name && rawId) {
+          const id =
+            `${donationData.platform || "afreeca"}:${rawId}`;
+          const room =
+            this.mvpRooms[member.name] || {};
+          const saved = room[id] || {
+            id,
+            name: name.slice(0, 20),
+            total: 0,
+          };
+          saved.name = name.slice(0, 20);
+          saved.total += value;
+          room[id] = saved;
+          this.mvpRooms[member.name] = room;
+          liveDonation = {
+            member: member.displayName,
+            id,
+            name: saved.name,
+            value,
+          };
+        }
+
         await this.ctx.storage.put({
           gauges: this.gauges,
           donationKeys:
             this.donationKeys,
+          mvpRooms: this.mvpRooms,
+        });
+
+        this.broadcast({
+          ...this.snapshot("donation"),
+          donation: liveDonation,
         });
       }
     }
@@ -536,6 +634,90 @@ export class GaugeCollector extends DurableObject {
         }
       ),
     }));
+  }
+
+  rebuildMvpFromEvents() {
+    const rooms =
+      structuredClone(EMPTY_MVP_ROOMS);
+    const seen = new Set();
+    for (const event of [...this.events].reverse()) {
+      const payload =
+        Array.isArray(event.parsed)
+          ? event.parsed[1]
+          : null;
+      const data = payload?.data;
+      const value = Number(data?.value) || 0;
+      const name = String(
+        data?.uname || data?.name || ""
+      ).trim();
+      const rawId = String(
+        data?.uid || data?.id || name
+      ).trim().toLowerCase();
+      if (!value || !name || !rawId) continue;
+      const key = [
+        event.member,
+        data.platform || "",
+        data.time || "",
+        data.uid || "",
+        data.value || "",
+      ].join(":");
+      if (seen.has(key)) continue;
+      seen.add(key);
+      const id =
+        `${data.platform || "afreeca"}:${rawId}`;
+      const room =
+        rooms[event.member] ||
+        (rooms[event.member] = {});
+      const saved = room[id] || {
+        id,
+        name: name.slice(0, 20),
+        total: 0,
+      };
+      saved.total += value;
+      room[id] = saved;
+    }
+    return rooms;
+  }
+
+  mvpRanks() {
+    const donors = new Map();
+    for (const member of MEMBERS) {
+      const room =
+        this.mvpRooms[member.name] || {};
+      for (const donor of Object.values(room)) {
+        const current = donors.get(donor.id);
+        if (!current || donor.total > current.total) {
+          donors.set(donor.id, {
+            ...donor,
+            room: member.displayName,
+          });
+        }
+      }
+    }
+    return [...donors.values()]
+      .filter((donor) => donor.total >= 100)
+      .sort((a, b) =>
+        b.total - a.total ||
+        a.name.localeCompare(b.name, "ko")
+      )
+      .slice(0, 5);
+  }
+
+  snapshot(type) {
+    return {
+      success: true,
+      type,
+      gauges: this.gauges,
+      ranks: this.mvpRanks(),
+      updatedAt: new Date().toISOString(),
+    };
+  }
+
+  broadcast(data) {
+    const message = JSON.stringify(data);
+    for (const socket of this.ctx.getWebSockets()) {
+      try { socket.send(message); } catch {}
+    }
   }
 
   corsHeaders() {
