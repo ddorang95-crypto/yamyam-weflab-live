@@ -6,18 +6,21 @@ const MEMBERS = [
     displayName: "야미",
     idx: "mNzL0s3DwWhrZXKAp52WpYI",
     afreecaId: "kisss2",
+    mvpPreset: "2",
   },
   {
     name: "seonha",
     displayName: "선하",
     idx: "mNzL0s3DwWFsZGuAp52WpYI",
     afreecaId: "ols3",
+    mvpPreset: "0",
   },
   {
     name: "dorit",
     displayName: "도릿",
     idx: "mNzL0s3DwWdsZG2Ap52WpYI",
     afreecaId: "chziaxz",
+    mvpPreset: "0",
   },
 ];
 
@@ -238,26 +241,41 @@ export class GaugeCollector extends DurableObject {
     }
 
     for (const member of MEMBERS) {
-      for (const server of SERVERS) {
-        const key =
-          `${member.name}:${server}`;
+      const channels = [
+        ...SERVERS.map((server) => ({
+          server,
+          pageid: "goal",
+          preset: "0",
+        })),
+        {
+          server: "ssmain.weflab.com",
+          pageid: "subtitle",
+          preset: member.mvpPreset,
+        },
+      ];
 
-        const current =
-          this.sockets.get(key);
+      for (const channel of channels) {
+        const key =
+          `${member.name}:${channel.server}:${channel.pageid}:${channel.preset}`;
+        const current = this.sockets.get(key);
 
         if (
           current &&
           (
-            current.readyState ===
-              WebSocket.OPEN ||
-            current.readyState ===
-              WebSocket.CONNECTING
+            current.readyState === WebSocket.OPEN ||
+            current.readyState === WebSocket.CONNECTING
           )
         ) {
           continue;
         }
 
-        this.connect(member, server, key);
+        this.connect(
+          member,
+          channel.server,
+          key,
+          channel.pageid,
+          channel.preset
+        );
       }
     }
 
@@ -266,14 +284,14 @@ export class GaugeCollector extends DurableObject {
     );
   }
 
-  connect(member, server, key) {
+  connect(member, server, key, pageid = "goal", preset = "0") {
     const socketUrl =
       `wss://${server}/socket.io/` +
       `?idx=${encodeURIComponent(
         member.idx
       )}` +
       `&type=page` +
-      `&page=goal` +
+      `&page=${encodeURIComponent(pageid)}` +
       `&EIO=4` +
       `&transport=websocket`;
 
@@ -303,15 +321,15 @@ export class GaugeCollector extends DurableObject {
                 id: member.afreecaId,
                 page: "page",
                 idx: member.idx,
-                pageid: "goal",
-                preset: "0",
+                pageid,
+                preset,
               }
             : {
                 type: "join",
                 page: "page",
                 idx: member.idx,
-                pageid: "goal",
-                preset: "0",
+                pageid,
+                preset,
               };
 
         socket.send(
@@ -428,7 +446,7 @@ export class GaugeCollector extends DurableObject {
     if (
       payload &&
       payload.type === "reset_page" &&
-      payload.pageid === "goal"
+      (payload.pageid === "goal" || payload.pageid === "subtitle")
     ) {
       this.gauges[member.name].weflab = 0;
       this.gauges[member.name].updatedAt =
