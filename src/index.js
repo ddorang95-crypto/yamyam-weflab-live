@@ -83,6 +83,8 @@ export class GaugeCollector extends DurableObject {
     this.gauges = structuredClone(EMPTY_GAUGES);
     this.mvpRooms = structuredClone(EMPTY_MVP_ROOMS);
     this.startedAt = null;
+    this.collectorEnabled = true;
+    this.enabledAt = 0;
 
     this.ready = this.ctx.blockConcurrencyWhile(
       async () => {
@@ -126,6 +128,10 @@ export class GaugeCollector extends DurableObject {
           (await this.ctx.storage.get(
             "startedAt"
           )) || null;
+
+        const storedEnabled = await this.ctx.storage.get("collectorEnabled");
+        this.collectorEnabled = storedEnabled !== false;
+        this.enabledAt = Number(await this.ctx.storage.get("enabledAt")) || 0;
       }
     );
   }
@@ -142,12 +148,38 @@ export class GaugeCollector extends DurableObject {
       });
     }
 
+    if (url.pathname === "/control" && request.method === "POST") {
+      let body = {};
+      try {
+        body = await request.json();
+      } catch {
+        return this.json({ success: false, error: "잘못된 요청입니다" }, 400);
+      }
+      if (typeof body.enabled !== "boolean")
+        return this.json({ success: false, error: "enabled 값이 필요합니다" }, 400);
+
+      this.collectorEnabled = body.enabled;
+      if (body.enabled) {
+        this.enabledAt = Date.now();
+        await this.ctx.storage.put({
+          collectorEnabled: true,
+          enabledAt: this.enabledAt,
+        });
+        await this.startConnections();
+      } else {
+        await this.ctx.storage.put("collectorEnabled", false);
+        await this.closeUpstreamConnections();
+        await this.ctx.storage.deleteAlarm();
+      }
+      return this.json(this.snapshot("control"));
+    }
+
     if (
       url.pathname === "/live" &&
       request.headers.get("Upgrade") ===
         "websocket"
     ) {
-      await this.startConnections();
+      if (this.collectorEnabled) await this.startConnections();
       const pair = new WebSocketPair();
       const [client, server] =
         Object.values(pair);
@@ -162,12 +194,12 @@ export class GaugeCollector extends DurableObject {
     }
 
     if (url.pathname === "/mvp") {
-      await this.startConnections();
+      if (this.collectorEnabled) await this.startConnections();
       return this.json(this.snapshot("snapshot"));
     }
 
     if (url.pathname === "/start") {
-      await this.startConnections();
+      if (this.collectorEnabled) await this.startConnections();
 
       return this.json({
         success: true,
@@ -181,7 +213,7 @@ export class GaugeCollector extends DurableObject {
       url.pathname === "/gauge" ||
       url.pathname === "/gauges"
     ) {
-      await this.startConnections();
+      if (this.collectorEnabled) await this.startConnections();
 
       return this.json({
         success: true,
@@ -192,7 +224,7 @@ export class GaugeCollector extends DurableObject {
     }
 
     if (url.pathname === "/events") {
-      await this.startConnections();
+      if (this.collectorEnabled) await this.startConnections();
 
       return this.json({
         success: true,
@@ -217,7 +249,7 @@ export class GaugeCollector extends DurableObject {
       });
     }
 
-    await this.startConnections();
+    if (this.collectorEnabled) await this.startConnections();
 
     return this.json({
       ready: true,
@@ -249,6 +281,7 @@ export class GaugeCollector extends DurableObject {
 
   async alarm() {
     await this.ready;
+    if (!this.collectorEnabled) return;
     await this.startConnections();
 
     await this.ctx.storage.setAlarm(
@@ -257,6 +290,7 @@ export class GaugeCollector extends DurableObject {
   }
 
   async startConnections() {
+    if (!this.collectorEnabled) return;
     if (!this.startedAt) {
       this.startedAt = new Date().toISOString();
 
@@ -297,6 +331,13 @@ export class GaugeCollector extends DurableObject {
     await this.ctx.storage.setAlarm(
       Date.now() + 60000
     );
+  }
+
+  async closeUpstreamConnections() {
+    for (const socket of this.sockets.values()) {
+      try { socket.close(1000, "collector-off"); } catch {}
+    }
+    this.sockets.clear();
   }
 
   connect(member, server, key, channel) {
@@ -421,14 +462,14 @@ export class GaugeCollector extends DurableObject {
       socket.addEventListener(
         "close",
         () => {
-          this.sockets.delete(key);
+          if (this.sockets.get(key) === socket) this.sockets.delete(key);
         }
       );
 
       socket.addEventListener(
         "error",
         () => {
-          this.sockets.delete(key);
+          if (this.sockets.get(key) === socket) this.sockets.delete(key);
         }
       );
     } catch (error) {
@@ -458,6 +499,9 @@ export class GaugeCollector extends DurableObject {
         ? parsed[1]
         : null;
 
+    // OFF로 바뀌는 순간 이미 도착 중이던 메시지도 저장하지 않는다.
+    if (!this.collectorEnabled) return;
+
     if (payload?.type === "reset_page") {
       if (payload.pageid === "goal") {
         this.gauges[member.name].weflab = 0;
@@ -485,6 +529,18 @@ export class GaugeCollector extends DurableObject {
       isDonation &&
       donationData
     ) {
+      const eventTime = Number(donationData.time) || 0;
+      // 재연결 시 위플랩이 과거 메시지를 다시 보내도 ON 이전 후원은 폐기한다.
+      if (eventTime && this.enabledAt && eventTime < this.enabledAt) {
+        await this.recordEvent({
+          member: member.name,
+          displayName: member.displayName,
+          server,
+          kind: "ignored-before-enabled",
+          receivedAt: new Date().toISOString(),
+        });
+        return;
+      }
       const value =
         Number(donationData.value) || 0;
 
@@ -775,6 +831,8 @@ export class GaugeCollector extends DurableObject {
     return {
       success: true,
       type,
+      collectorEnabled: this.collectorEnabled,
+      enabledAt: this.enabledAt || null,
       gauges: this.gauges,
       ranks: this.mvpRanks(),
       updatedAt: new Date().toISOString(),
@@ -792,7 +850,7 @@ export class GaugeCollector extends DurableObject {
     return {
       "Access-Control-Allow-Origin": "*",
       "Access-Control-Allow-Methods":
-        "GET, OPTIONS",
+        "GET, POST, OPTIONS",
       "Access-Control-Allow-Headers":
         "Content-Type",
       "Cache-Control": "no-store",
