@@ -71,6 +71,14 @@ const EMPTY_MVP_ROOMS = {
   anonymous: {},
 };
 
+function donorId(platform, name) {
+  const normalizedName = String(name || "")
+    .normalize("NFKC")
+    .trim()
+    .toLocaleLowerCase("ko-KR");
+  return `${platform || "afreeca"}:name:${normalizedName}`;
+}
+
 export class GaugeCollector extends DurableObject {
   constructor(ctx, env) {
     super(ctx, env);
@@ -123,7 +131,10 @@ export class GaugeCollector extends DurableObject {
           });
         }
 
-        if (this.applyRecentSubtitleResets() || this.removeMissionGifts()) {
+        const resetChanged = this.applyRecentSubtitleResets();
+        const missionChanged = this.removeMissionGifts();
+        const donorMergeChanged = this.mergeDuplicateDonors();
+        if (resetChanged || missionChanged || donorMergeChanged) {
           await this.ctx.storage.put("mvpRooms", this.mvpRooms);
         }
 
@@ -730,16 +741,10 @@ export class GaugeCollector extends DurableObject {
           donationData.name ||
           ""
         ).trim();
-        const rawId = String(
-          donationData.uid ||
-          donationData.id ||
-          name
-        ).trim().toLowerCase();
         let liveDonation = null;
 
-        if (name && rawId) {
-          const id =
-            `${donationData.platform || "afreeca"}:${rawId}`;
+        if (name) {
+          const id = donorId(donationData.platform, name);
           const room =
             this.mvpRooms[member.name] || {};
           const saved = room[id] || {
@@ -892,10 +897,7 @@ export class GaugeCollector extends DurableObject {
       const name = String(
         data?.uname || data?.name || ""
       ).trim();
-      const rawId = String(
-        data?.uid || data?.id || name
-      ).trim().toLowerCase();
-      if (!value || !name || !rawId) continue;
+      if (!value || !name) continue;
       const key = [
         event.member,
         data.platform || "",
@@ -905,8 +907,7 @@ export class GaugeCollector extends DurableObject {
       ].join(":");
       if (seen.has(key)) continue;
       seen.add(key);
-      const id =
-        `${data.platform || "afreeca"}:${rawId}`;
+      const id = donorId(data.platform, name);
       const room =
         rooms[event.member] ||
         (rooms[event.member] = {});
@@ -944,8 +945,7 @@ export class GaugeCollector extends DurableObject {
       ) continue;
       const value = Number(data?.value) || 0;
       const name = String(data?.uname || data?.name || "").trim();
-      const rawId = String(data?.uid || data?.id || name).trim().toLowerCase();
-      if (!value || !name || !rawId) continue;
+      if (!value || !name) continue;
       const donationKey = [
         event.member,
         data.platform || "",
@@ -956,13 +956,34 @@ export class GaugeCollector extends DurableObject {
       if (seen.has(donationKey)) continue;
       seen.add(donationKey);
 
-      const id = `${data.platform || "afreeca"}:${rawId}`;
+      const id = donorId(data.platform, name);
       const room = this.mvpRooms[event.member] || {};
       const saved = room[id] || { id, name: name.slice(0, 20), total: 0 };
       saved.name = name.slice(0, 20);
       saved.total += value;
       room[id] = saved;
       this.mvpRooms[event.member] = room;
+    }
+    return changed;
+  }
+
+  mergeDuplicateDonors() {
+    let changed = false;
+    for (const [memberName, room] of Object.entries(this.mvpRooms)) {
+      const merged = {};
+      for (const donor of Object.values(room || {})) {
+        const name = String(donor?.name || "").trim();
+        const total = Number(donor?.total) || 0;
+        if (!name || total <= 0) continue;
+        const platform = String(donor?.id || "").split(":")[0] || "afreeca";
+        const id = donorId(platform, name);
+        if (id !== donor.id || merged[id]) changed = true;
+        const saved = merged[id] || { id, name: name.slice(0, 20), total: 0 };
+        saved.name = name.slice(0, 20);
+        saved.total += total;
+        merged[id] = saved;
+      }
+      this.mvpRooms[memberName] = merged;
     }
     return changed;
   }
