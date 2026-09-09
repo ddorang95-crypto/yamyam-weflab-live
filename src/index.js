@@ -129,7 +129,7 @@ export class GaugeCollector extends DurableObject {
       request.headers.get("Upgrade") ===
         "websocket"
     ) {
-      await this.startConnections();
+      this.ctx.waitUntil(this.startConnections());
       const pair = new WebSocketPair();
       const [client, server] =
         Object.values(pair);
@@ -144,7 +144,7 @@ export class GaugeCollector extends DurableObject {
     }
 
     if (url.pathname === "/mvp") {
-      await this.startConnections();
+      this.ctx.waitUntil(this.startConnections());
       return this.json(this.snapshot("snapshot"));
     }
 
@@ -163,7 +163,7 @@ export class GaugeCollector extends DurableObject {
       url.pathname === "/gauge" ||
       url.pathname === "/gauges"
     ) {
-      await this.startConnections();
+      this.ctx.waitUntil(this.startConnections());
 
       return this.json({
         success: true,
@@ -174,7 +174,7 @@ export class GaugeCollector extends DurableObject {
     }
 
     if (url.pathname === "/events") {
-      await this.startConnections();
+      this.ctx.waitUntil(this.startConnections());
 
       return this.json({
         success: true,
@@ -199,7 +199,7 @@ export class GaugeCollector extends DurableObject {
       });
     }
 
-    await this.startConnections();
+    this.ctx.waitUntil(this.startConnections());
 
     return this.json({
       ready: true,
