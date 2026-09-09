@@ -350,7 +350,12 @@ export class GaugeCollector extends DurableObject {
           idx: member.idx,
           pageid: "goal",
           preset: "0",
-          start: "",
+          start: new Intl.DateTimeFormat("en-CA", {
+            timeZone: "Asia/Seoul",
+            year: "numeric",
+            month: "2-digit",
+            day: "2-digit",
+          }).format(new Date()),
           reset: "",
           autoreset: "autoreset",
           date: "",
