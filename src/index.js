@@ -102,6 +102,10 @@ export class GaugeCollector extends DurableObject {
           ...((await this.ctx.storage.get("mvpRooms")) || this.rebuildMvpFromEvents()),
         };
 
+        if (this.applyRecentSubtitleResets()) {
+          await this.ctx.storage.put("mvpRooms", this.mvpRooms);
+        }
+
         this.startedAt =
           (await this.ctx.storage.get(
             "startedAt"
@@ -258,10 +262,8 @@ export class GaugeCollector extends DurableObject {
         if (
           current &&
           (
-            current.readyState ===
-              WebSocket.OPEN ||
-            current.readyState ===
-              WebSocket.CONNECTING
+            current.readyState === WebSocket.OPEN ||
+            current.readyState === WebSocket.CONNECTING
           )
         ) {
           continue;
@@ -435,26 +437,19 @@ export class GaugeCollector extends DurableObject {
         ? parsed[1]
         : null;
 
-    if (
-      payload &&
-      payload.type === "reset_page" &&
-      payload.pageid === "goal"
-    ) {
-      this.gauges[member.name].weflab = 0;
-      this.gauges[member.name].updatedAt =
-        new Date().toISOString();
+    if (payload?.type === "reset_page") {
+      if (payload.pageid === "goal") {
+        this.gauges[member.name].weflab = 0;
+        this.gauges[member.name].updatedAt = new Date().toISOString();
+        await this.ctx.storage.put("gauges", this.gauges);
+        this.broadcast(this.snapshot("snapshot"));
+      }
 
-      await this.ctx.storage.put(
-        "gauges",
-        this.gauges
-      );
-
-      this.mvpRooms[member.name] = {};
-      await this.ctx.storage.put(
-        "mvpRooms",
-        this.mvpRooms
-      );
-      this.broadcast(this.snapshot("snapshot"));
+      if (payload.pageid === "subtitle") {
+        this.mvpRooms[member.name] = {};
+        await this.ctx.storage.put("mvpRooms", this.mvpRooms);
+        this.broadcast(this.snapshot("snapshot"));
+      }
     }
 
     const donationData =
@@ -687,6 +682,47 @@ export class GaugeCollector extends DurableObject {
       room[id] = saved;
     }
     return rooms;
+  }
+
+  applyRecentSubtitleResets() {
+    const resetMembers = new Set();
+    const seen = new Set();
+    let changed = false;
+
+    for (const event of [...this.events].reverse()) {
+      const payload = Array.isArray(event.parsed) ? event.parsed[1] : null;
+      if (payload?.type === "reset_page" && payload.pageid === "subtitle") {
+        this.mvpRooms[event.member] = {};
+        resetMembers.add(event.member);
+        changed = true;
+        continue;
+      }
+      if (!resetMembers.has(event.member)) continue;
+
+      const data = payload?.data;
+      const value = Number(data?.value) || 0;
+      const name = String(data?.uname || data?.name || "").trim();
+      const rawId = String(data?.uid || data?.id || name).trim().toLowerCase();
+      if (!value || !name || !rawId) continue;
+      const donationKey = [
+        event.member,
+        data.platform || "",
+        data.time || "",
+        data.uid || "",
+        data.value || "",
+      ].join(":");
+      if (seen.has(donationKey)) continue;
+      seen.add(donationKey);
+
+      const id = `${data.platform || "afreeca"}:${rawId}`;
+      const room = this.mvpRooms[event.member] || {};
+      const saved = room[id] || { id, name: name.slice(0, 20), total: 0 };
+      saved.name = name.slice(0, 20);
+      saved.total += value;
+      room[id] = saved;
+      this.mvpRooms[event.member] = room;
+    }
+    return changed;
   }
 
   mvpRanks() {
