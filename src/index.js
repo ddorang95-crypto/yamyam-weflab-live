@@ -1,13 +1,12 @@
 import { DurableObject } from "cloudflare:workers";
 
-const DEFAULT_MEMBERS = [
+const MEMBERS = [
   {
     name: "yami",
     displayName: "야미",
     idx: "mNzL0s3DwWhrZXKAp52WpYI",
     afreecaId: "kisss2",
     platform: "afreeca",
-    mvpPreset: "2",
   },
   {
     name: "seonha",
@@ -15,7 +14,6 @@ const DEFAULT_MEMBERS = [
     idx: "mNzL0s3DwWFsZGuAp52WpYI",
     afreecaId: "ols3",
     platform: "afreeca",
-    mvpPreset: "0",
   },
   {
     name: "dorit",
@@ -23,7 +21,6 @@ const DEFAULT_MEMBERS = [
     idx: "mNzL0s3DwWdsZG2Ap52WpYI",
     afreecaId: "chziaxz",
     platform: "afreeca",
-    mvpPreset: "0",
   },
   {
     name: "anonymous",
@@ -31,7 +28,6 @@ const DEFAULT_MEMBERS = [
     idx: "mNzL0s3DwWFrZWpWr8SWpJGbUQ",
     afreecaId: "UC-C8YE-QVl4P92I4j7XssCQ",
     platform: "youtube",
-    mvpPreset: "0",
   },
 ];
 
@@ -83,8 +79,6 @@ export class GaugeCollector extends DurableObject {
     this.gauges = structuredClone(EMPTY_GAUGES);
     this.mvpRooms = structuredClone(EMPTY_MVP_ROOMS);
     this.startedAt = null;
-    this.members = structuredClone(DEFAULT_MEMBERS);
-    this.configCheckedAt = 0;
 
     this.ready = this.ctx.blockConcurrencyWhile(
       async () => {
@@ -172,7 +166,7 @@ export class GaugeCollector extends DurableObject {
       return this.json({
         success: true,
         gauges: this.gauges,
-        total: this.members.reduce((sum, member) => sum + (this.gauges[member.name]?.weflab || 0), 0),
+        total: MEMBERS.reduce((sum, member) => sum + (this.gauges[member.name]?.weflab || 0), 0),
         connections: this.connectionStatus(),
       });
     }
@@ -212,7 +206,7 @@ export class GaugeCollector extends DurableObject {
         "YAMYAM 실시간 게이지 수집기 작동 중",
       startedAt: this.startedAt,
       gauges: this.gauges,
-      total: this.members.reduce((sum, member) => sum + (this.gauges[member.name]?.weflab || 0), 0),
+      total: MEMBERS.reduce((sum, member) => sum + (this.gauges[member.name]?.weflab || 0), 0),
       connections: this.connectionStatus(),
       gaugeUrl: `${url.origin}/gauges`,
       eventsUrl: `${url.origin}/events`,
@@ -242,34 +236,7 @@ export class GaugeCollector extends DurableObject {
     );
   }
 
-  async refreshMembers() {
-    if (Date.now() - this.configCheckedAt < 15000) return;
-    this.configCheckedAt = Date.now();
-    try {
-      const response = await fetch("https://yamyam-gauge.ddorang95.chatgpt.site/api/member-config", { headers: { "cache-control": "no-cache" } });
-      if (!response.ok) return;
-      const data = await response.json();
-      if (!Array.isArray(data.members)) return;
-      const next = data.members.filter((member) => member?.name && member?.idx && member?.platformId).map((member) => ({
-        name: String(member.name), displayName: String(member.displayName || member.name), idx: String(member.idx),
-        afreecaId: String(member.platformId), platform: member.platform === "youtube" ? "youtube" : "afreeca",
-        mvpPreset: String(member.mvpPreset || "0"),
-      }));
-      if (!next.length && data.members.length) return;
-      const active = new Set(next.map((member) => member.name));
-      for (const [key, socket] of this.sockets.entries()) {
-        if (!active.has(key.split(":")[0])) { try { socket.close(); } catch {} this.sockets.delete(key); }
-      }
-      for (const member of next) {
-        if (!this.gauges[member.name]) this.gauges[member.name] = { displayName: member.displayName, weflab: 0, updatedAt: null };
-        if (!this.mvpRooms[member.name]) this.mvpRooms[member.name] = {};
-      }
-      this.members = next;
-    } catch {}
-  }
-
   async startConnections() {
-    await this.refreshMembers();
     if (!this.startedAt) {
       this.startedAt = new Date().toISOString();
 
@@ -279,42 +246,28 @@ export class GaugeCollector extends DurableObject {
       );
     }
 
-    for (const member of this.members) {
-      const channels = [
-        ...SERVERS.filter((server) => server === "ssmain.weflab.com" || server === `ss${member.platform || "afreeca"}.weflab.com`).map((server) => ({
-          server,
-          pageid: "goal",
-          preset: "0",
-        })),
-        {
-          server: "ssmain.weflab.com",
-          pageid: "subtitle",
-          preset: member.mvpPreset,
-        },
-      ];
-
-      for (const channel of channels) {
+    for (const member of MEMBERS) {
+      for (const server of SERVERS) {
+        if (server !== "ssmain.weflab.com" && server !== `ss${member.platform || "afreeca"}.weflab.com`) continue;
         const key =
-          `${member.name}:${channel.server}:${channel.pageid}:${channel.preset}`;
-        const current = this.sockets.get(key);
+          `${member.name}:${server}`;
+
+        const current =
+          this.sockets.get(key);
 
         if (
           current &&
           (
-            current.readyState === WebSocket.OPEN ||
-            current.readyState === WebSocket.CONNECTING
+            current.readyState ===
+              WebSocket.OPEN ||
+            current.readyState ===
+              WebSocket.CONNECTING
           )
         ) {
           continue;
         }
 
-        this.connect(
-          member,
-          channel.server,
-          key,
-          channel.pageid,
-          channel.preset
-        );
+        this.connect(member, server, key);
       }
     }
 
@@ -323,14 +276,14 @@ export class GaugeCollector extends DurableObject {
     );
   }
 
-  connect(member, server, key, pageid = "goal", preset = "0") {
+  connect(member, server, key) {
     const socketUrl =
       `wss://${server}/socket.io/` +
       `?idx=${encodeURIComponent(
         member.idx
       )}` +
       `&type=page` +
-      `&page=${encodeURIComponent(pageid)}` +
+      `&page=goal` +
       `&EIO=4` +
       `&transport=websocket`;
 
@@ -360,15 +313,15 @@ export class GaugeCollector extends DurableObject {
                 id: member.afreecaId,
                 page: "page",
                 idx: member.idx,
-                pageid,
-                preset,
+                pageid: "goal",
+                preset: "0",
               }
             : {
                 type: "join",
                 page: "page",
                 idx: member.idx,
-                pageid,
-                preset,
+                pageid: "goal",
+                preset: "0",
               };
 
         socket.send(
@@ -485,7 +438,7 @@ export class GaugeCollector extends DurableObject {
     if (
       payload &&
       payload.type === "reset_page" &&
-      (payload.pageid === "goal" || payload.pageid === "subtitle")
+      payload.pageid === "goal"
     ) {
       this.gauges[member.name].weflab = 0;
       this.gauges[member.name].updatedAt =
@@ -668,28 +621,24 @@ export class GaugeCollector extends DurableObject {
   }
 
   connectionStatus() {
-    return this.members.map((member) => ({
+    return MEMBERS.map((member) => ({
       name: member.name,
       displayName:
         member.displayName,
-      connections: SERVERS.map(
+      connections: SERVERS.filter((server) => server === "ssmain.weflab.com" || server === `ss${member.platform || "afreeca"}.weflab.com`).map(
         (server) => {
-          const sockets = [...this.sockets.entries()]
-            .filter(([key]) =>
-              key.startsWith(`${member.name}:${server}:`)
-            )
-            .map(([, socket]) => socket);
-          const openSocket = sockets.find(
-            (socket) =>
-              socket.readyState === WebSocket.OPEN
-          );
+          const socket =
+            this.sockets.get(
+              `${member.name}:${server}`
+            );
 
           return {
             server,
-            connected: Boolean(openSocket),
+            connected:
+              socket?.readyState ===
+              WebSocket.OPEN,
             state:
-              openSocket?.readyState ??
-              sockets[0]?.readyState ??
+              socket?.readyState ??
               "not-started",
           };
         }
@@ -742,7 +691,7 @@ export class GaugeCollector extends DurableObject {
 
   mvpRanks() {
     const donors = new Map();
-    for (const member of this.members) {
+    for (const member of MEMBERS) {
       const room =
         this.mvpRooms[member.name] || {};
       for (const donor of Object.values(room)) {
@@ -756,7 +705,7 @@ export class GaugeCollector extends DurableObject {
       }
     }
     return [...donors.values()]
-      .filter((donor) => donor.total >= 100)
+      .filter((donor) => donor.total >= 1)
       .sort((a, b) =>
         b.total - a.total ||
         a.name.localeCompare(b.name, "ko")
