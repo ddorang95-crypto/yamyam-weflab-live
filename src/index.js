@@ -85,6 +85,7 @@ export class GaugeCollector extends DurableObject {
     this.startedAt = null;
     this.collectorEnabled = true;
     this.enabledAt = 0;
+    this.lastGaugeReconcileAt = 0;
 
     this.ready = this.ctx.blockConcurrencyWhile(
       async () => {
@@ -328,9 +329,75 @@ export class GaugeCollector extends DurableObject {
       }
     }
 
+    if (Date.now() - this.lastGaugeReconcileAt >= 30000) {
+      this.lastGaugeReconcileAt = Date.now();
+      this.ctx.waitUntil(this.reconcileGauges());
+    }
+
     await this.ctx.storage.setAlarm(
       Date.now() + 60000
     );
+  }
+
+  async reconcileGauges() {
+    if (!this.collectorEnabled) return;
+    let changed = false;
+    for (const member of MEMBERS) {
+      try {
+        const body = new URLSearchParams({
+          type: "goal_load",
+          pagetype: "page",
+          idx: member.idx,
+          pageid: "goal",
+          preset: "0",
+          start: "",
+          reset: "",
+          autoreset: "autoreset",
+          date: "",
+          resettype: "load",
+        });
+        body.set("ver[server]", "20240607");
+        body.set("ver[socket]", "20240607");
+        const response = await fetch("https://weflab.com/api/", {
+          method: "POST",
+          headers: {
+            "content-type": "application/x-www-form-urlencoded; charset=UTF-8",
+            "x-requested-with": "XMLHttpRequest",
+          },
+          body,
+        });
+        if (!response.ok) continue;
+        const json = await response.json();
+        const rows = Array.isArray(json.data) ? json.data : [];
+        const total = rows.reduce((sum, row) => {
+          const rawTime = row?.time;
+          const eventTime = typeof rawTime === "number"
+            ? rawTime
+            : Date.parse(String(rawTime || "").replace(" ", "T") + "+09:00");
+          if (this.enabledAt && (!Number.isFinite(eventTime) || eventTime < this.enabledAt)) return sum;
+          const value = Number(row?.real ?? row?.value ?? 0);
+          return sum + (Number.isFinite(value) && value > 0 ? value : 0);
+        }, 0);
+        if ((this.gauges[member.name]?.weflab || 0) !== total) {
+          this.gauges[member.name].weflab = total;
+          this.gauges[member.name].updatedAt = new Date().toISOString();
+          changed = true;
+        }
+      } catch (error) {
+        await this.recordEvent({
+          member: member.name,
+          displayName: member.displayName,
+          server: "weflab-api",
+          kind: "reconcile-error",
+          error: String(error),
+          receivedAt: new Date().toISOString(),
+        });
+      }
+    }
+    if (changed) {
+      await this.ctx.storage.put("gauges", this.gauges);
+      this.broadcast(this.snapshot("snapshot"));
+    }
   }
 
   async closeUpstreamConnections() {
