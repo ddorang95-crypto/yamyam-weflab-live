@@ -475,7 +475,10 @@ export class GaugeCollector extends DurableObject {
           const value = Number(row?.real ?? row?.value ?? 0);
           return sum + (Number.isFinite(value) && value > 0 ? value : 0);
         }, 0);
-        if ((this.gauges[member.name]?.weflab || 0) !== total) {
+        const current = this.gauges[member.name]?.weflab || 0;
+        // goal_load에는 위플랩 테스트 후원이 빠질 수 있으므로 실행 중에는
+        // API 보정값이 더 클 때만 올린다. 감소/초기화는 reset_page 신호만 처리한다.
+        if (total > current) {
           this.gauges[member.name].weflab = total;
           this.gauges[member.name].updatedAt = new Date().toISOString();
           changed = true;
@@ -623,19 +626,16 @@ export class GaugeCollector extends DurableObject {
         }
       );
 
-      socket.addEventListener(
-        "close",
-        () => {
-          if (this.sockets.get(key) === socket) this.sockets.delete(key);
-        }
-      );
+      const reconnect = () => {
+        if (this.sockets.get(key) === socket) this.sockets.delete(key);
+        if (!this.collectorEnabled) return;
+        setTimeout(() => {
+          if (this.collectorEnabled) this.ctx.waitUntil(this.startConnections());
+        }, 1500);
+      };
 
-      socket.addEventListener(
-        "error",
-        () => {
-          if (this.sockets.get(key) === socket) this.sockets.delete(key);
-        }
-      );
+      socket.addEventListener("close", reconnect);
+      socket.addEventListener("error", reconnect);
     } catch (error) {
       this.ctx.waitUntil(
         this.recordEvent({
