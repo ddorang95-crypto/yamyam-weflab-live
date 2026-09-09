@@ -330,6 +330,19 @@ export class GaugeCollector extends DurableObject {
           this.sockets.delete(key);
         }
       }
+      for (const memberName of Object.keys(this.gauges)) {
+        if (!active.has(memberName)) delete this.gauges[memberName];
+      }
+      for (const memberName of Object.keys(this.mvpRooms)) {
+        if (!active.has(memberName)) delete this.mvpRooms[memberName];
+      }
+      this.events = this.events.filter(
+        (event) => event.member === "system" || active.has(event.member),
+      );
+      this.donationKeys = this.events
+        .map((event) => event.donationKey)
+        .filter(Boolean)
+        .slice(-2000);
       this.members = next;
       for (const member of this.members) {
         if (!this.gauges[member.name]) {
