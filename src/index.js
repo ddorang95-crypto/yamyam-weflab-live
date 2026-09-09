@@ -121,7 +121,7 @@ export class GaugeCollector extends DurableObject {
           });
         }
 
-        if (this.applyRecentSubtitleResets()) {
+        if (this.applyRecentSubtitleResets() || this.removeMissionGifts()) {
           await this.ctx.storage.put("mvpRooms", this.mvpRooms);
         }
 
@@ -380,6 +380,7 @@ export class GaugeCollector extends DurableObject {
             ? rawTime
             : Date.parse(String(rawTime || "").replace(" ", "T") + "+09:00");
           if (this.enabledAt && (!Number.isFinite(eventTime) || eventTime < this.enabledAt)) return sum;
+          if (row?.subtype !== "SENDBALLOON") return sum;
           const value = Number(row?.real ?? row?.value ?? 0);
           return sum + (Number.isFinite(value) && value > 0 ? value : 0);
         }, 0);
@@ -802,6 +803,11 @@ export class GaugeCollector extends DurableObject {
           ? event.parsed[1]
           : null;
       const data = payload?.data;
+      if (
+        data?.subtype !== "SENDBALLOON" &&
+        payload?.type !== "test_donation" &&
+        payload?.type !== "donation"
+      ) continue;
       const value = Number(data?.value) || 0;
       const name = String(
         data?.uname || data?.name || ""
@@ -851,6 +857,11 @@ export class GaugeCollector extends DurableObject {
       if (!resetMembers.has(event.member)) continue;
 
       const data = payload?.data;
+      if (
+        data?.subtype !== "SENDBALLOON" &&
+        payload?.type !== "test_donation" &&
+        payload?.type !== "donation"
+      ) continue;
       const value = Number(data?.value) || 0;
       const name = String(data?.uname || data?.name || "").trim();
       const rawId = String(data?.uid || data?.id || name).trim().toLowerCase();
@@ -872,6 +883,23 @@ export class GaugeCollector extends DurableObject {
       saved.total += value;
       room[id] = saved;
       this.mvpRooms[event.member] = room;
+    }
+    return changed;
+  }
+
+  removeMissionGifts() {
+    let changed = false;
+    for (const event of this.events) {
+      const payload = Array.isArray(event.parsed) ? event.parsed[1] : null;
+      const data = payload?.data;
+      if (data?.subtype !== "GIFT") continue;
+      const rawId = String(data.uid || data.id || data.name || "").trim().toLowerCase();
+      const id = `${data.platform || "afreeca"}:${rawId}`;
+      const room = this.mvpRooms[event.member];
+      if (room?.[id]) {
+        delete room[id];
+        changed = true;
+      }
     }
     return changed;
   }
