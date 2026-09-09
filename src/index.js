@@ -1,6 +1,6 @@
 import { DurableObject } from "cloudflare:workers";
 
-const MEMBERS = [
+const DEFAULT_MEMBERS = [
   {
     name: "yami",
     displayName: "야미",
@@ -83,6 +83,8 @@ export class GaugeCollector extends DurableObject {
     this.gauges = structuredClone(EMPTY_GAUGES);
     this.mvpRooms = structuredClone(EMPTY_MVP_ROOMS);
     this.startedAt = null;
+    this.members = structuredClone(DEFAULT_MEMBERS);
+    this.configCheckedAt = 0;
 
     this.ready = this.ctx.blockConcurrencyWhile(
       async () => {
@@ -170,7 +172,7 @@ export class GaugeCollector extends DurableObject {
       return this.json({
         success: true,
         gauges: this.gauges,
-        total: MEMBERS.reduce((sum, member) => sum + (this.gauges[member.name]?.weflab || 0), 0),
+        total: this.members.reduce((sum, member) => sum + (this.gauges[member.name]?.weflab || 0), 0),
         connections: this.connectionStatus(),
       });
     }
@@ -210,7 +212,7 @@ export class GaugeCollector extends DurableObject {
         "YAMYAM 실시간 게이지 수집기 작동 중",
       startedAt: this.startedAt,
       gauges: this.gauges,
-      total: MEMBERS.reduce((sum, member) => sum + (this.gauges[member.name]?.weflab || 0), 0),
+      total: this.members.reduce((sum, member) => sum + (this.gauges[member.name]?.weflab || 0), 0),
       connections: this.connectionStatus(),
       gaugeUrl: `${url.origin}/gauges`,
       eventsUrl: `${url.origin}/events`,
@@ -240,7 +242,34 @@ export class GaugeCollector extends DurableObject {
     );
   }
 
+  async refreshMembers() {
+    if (Date.now() - this.configCheckedAt < 15000) return;
+    this.configCheckedAt = Date.now();
+    try {
+      const response = await fetch("https://yamyam-gauge.ddorang95.chatgpt.site/api/member-config", { headers: { "cache-control": "no-cache" } });
+      if (!response.ok) return;
+      const data = await response.json();
+      if (!Array.isArray(data.members)) return;
+      const next = data.members.filter((member) => member?.name && member?.idx && member?.platformId).map((member) => ({
+        name: String(member.name), displayName: String(member.displayName || member.name), idx: String(member.idx),
+        afreecaId: String(member.platformId), platform: member.platform === "youtube" ? "youtube" : "afreeca",
+        mvpPreset: String(member.mvpPreset || "0"),
+      }));
+      if (!next.length && data.members.length) return;
+      const active = new Set(next.map((member) => member.name));
+      for (const [key, socket] of this.sockets.entries()) {
+        if (!active.has(key.split(":")[0])) { try { socket.close(); } catch {} this.sockets.delete(key); }
+      }
+      for (const member of next) {
+        if (!this.gauges[member.name]) this.gauges[member.name] = { displayName: member.displayName, weflab: 0, updatedAt: null };
+        if (!this.mvpRooms[member.name]) this.mvpRooms[member.name] = {};
+      }
+      this.members = next;
+    } catch {}
+  }
+
   async startConnections() {
+    await this.refreshMembers();
     if (!this.startedAt) {
       this.startedAt = new Date().toISOString();
 
@@ -250,7 +279,7 @@ export class GaugeCollector extends DurableObject {
       );
     }
 
-    for (const member of MEMBERS) {
+    for (const member of this.members) {
       const channels = [
         ...SERVERS.filter((server) => server === "ssmain.weflab.com" || server === `ss${member.platform || "afreeca"}.weflab.com`).map((server) => ({
           server,
@@ -639,7 +668,7 @@ export class GaugeCollector extends DurableObject {
   }
 
   connectionStatus() {
-    return MEMBERS.map((member) => ({
+    return this.members.map((member) => ({
       name: member.name,
       displayName:
         member.displayName,
@@ -713,7 +742,7 @@ export class GaugeCollector extends DurableObject {
 
   mvpRanks() {
     const donors = new Map();
-    for (const member of MEMBERS) {
+    for (const member of this.members) {
       const room =
         this.mvpRooms[member.name] || {};
       for (const donor of Object.values(room)) {
