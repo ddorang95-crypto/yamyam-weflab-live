@@ -7,6 +7,7 @@ const MEMBERS = [
     idx: "mNzL0s3DwWhrZXKAp52WpYI",
     afreecaId: "kisss2",
     platform: "afreeca",
+    mvpPreset: "2",
   },
   {
     name: "seonha",
@@ -14,6 +15,7 @@ const MEMBERS = [
     idx: "mNzL0s3DwWFsZGuAp52WpYI",
     afreecaId: "ols3",
     platform: "afreeca",
+    mvpPreset: "0",
   },
   {
     name: "dorit",
@@ -21,6 +23,7 @@ const MEMBERS = [
     idx: "mNzL0s3DwWdsZG2Ap52WpYI",
     afreecaId: "chziaxz",
     platform: "afreeca",
+    mvpPreset: "0",
   },
   {
     name: "anonymous",
@@ -28,6 +31,7 @@ const MEMBERS = [
     idx: "mNzL0s3DwWFrZWpWr8SWpJGbUQ",
     afreecaId: "UC-C8YE-QVl4P92I4j7XssCQ",
     platform: "youtube",
+    mvpPreset: "0",
   },
 ];
 
@@ -101,6 +105,18 @@ export class GaugeCollector extends DurableObject {
           ...structuredClone(EMPTY_MVP_ROOMS),
           ...((await this.ctx.storage.get("mvpRooms")) || this.rebuildMvpFromEvents()),
         };
+
+        // 2026-09-09: 야미 개인 후원순위는 이미 초기화됐지만 당시
+        // subtitle 채널을 직접 구독하지 않아 신호를 놓쳤다. 딱 한 번만
+        // 남아 있는 야미 방 MVP를 정리하고 이후에는 실시간 reset_page로 처리한다.
+        const yamiResetMigration = "mvpResetMigration:yami:2026-09-09";
+        if (!(await this.ctx.storage.get(yamiResetMigration))) {
+          this.mvpRooms.yami = {};
+          await this.ctx.storage.put({
+            mvpRooms: this.mvpRooms,
+            [yamiResetMigration]: true,
+          });
+        }
 
         if (this.applyRecentSubtitleResets()) {
           await this.ctx.storage.put("mvpRooms", this.mvpRooms);
@@ -251,10 +267,14 @@ export class GaugeCollector extends DurableObject {
     }
 
     for (const member of MEMBERS) {
+      for (const channel of [
+        { pageid: "goal", preset: "0" },
+        { pageid: "subtitle", preset: member.mvpPreset || "0" },
+      ]) {
       for (const server of SERVERS) {
         if (server !== "ssmain.weflab.com" && server !== `ss${member.platform || "afreeca"}.weflab.com`) continue;
         const key =
-          `${member.name}:${server}`;
+          `${member.name}:${channel.pageid}:${server}`;
 
         const current =
           this.sockets.get(key);
@@ -269,7 +289,8 @@ export class GaugeCollector extends DurableObject {
           continue;
         }
 
-        this.connect(member, server, key);
+        this.connect(member, server, key, channel);
+      }
       }
     }
 
@@ -278,14 +299,14 @@ export class GaugeCollector extends DurableObject {
     );
   }
 
-  connect(member, server, key) {
+  connect(member, server, key, channel) {
     const socketUrl =
       `wss://${server}/socket.io/` +
       `?idx=${encodeURIComponent(
         member.idx
       )}` +
       `&type=page` +
-      `&page=goal` +
+      `&page=${encodeURIComponent(channel.pageid)}` +
       `&EIO=4` +
       `&transport=websocket`;
 
@@ -315,15 +336,15 @@ export class GaugeCollector extends DurableObject {
                 id: member.afreecaId,
                 page: "page",
                 idx: member.idx,
-                pageid: "goal",
-                preset: "0",
+                pageid: channel.pageid,
+                preset: channel.preset,
               }
             : {
                 type: "join",
                 page: "page",
                 idx: member.idx,
-                pageid: "goal",
-                preset: "0",
+                pageid: channel.pageid,
+                preset: channel.preset,
               };
 
         socket.send(
@@ -620,15 +641,16 @@ export class GaugeCollector extends DurableObject {
       name: member.name,
       displayName:
         member.displayName,
-      connections: SERVERS.filter((server) => server === "ssmain.weflab.com" || server === `ss${member.platform || "afreeca"}.weflab.com`).map(
+      connections: ["goal", "subtitle"].flatMap((pageid) => SERVERS.filter((server) => server === "ssmain.weflab.com" || server === `ss${member.platform || "afreeca"}.weflab.com`).map(
         (server) => {
           const socket =
             this.sockets.get(
-              `${member.name}:${server}`
+              `${member.name}:${pageid}:${server}`
             );
 
           return {
             server,
+            pageid,
             connected:
               socket?.readyState ===
               WebSocket.OPEN,
@@ -637,7 +659,7 @@ export class GaugeCollector extends DurableObject {
               "not-started",
           };
         }
-      ),
+      )),
     }));
   }
 
