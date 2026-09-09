@@ -74,8 +74,6 @@ export class GaugeCollector extends DurableObject {
     this.ctx = ctx;
     this.env = env;
     this.sockets = new Map();
-    this.socketActivity = new Map();
-    this.eventQueue = Promise.resolve();
     this.events = [];
     this.donationKeys = [];
     this.gauges = structuredClone(EMPTY_GAUGES);
@@ -234,12 +232,11 @@ export class GaugeCollector extends DurableObject {
     await this.startConnections();
 
     await this.ctx.storage.setAlarm(
-      Date.now() + 30000
+      Date.now() + 60000
     );
   }
 
   async startConnections() {
-    this.socketActivity ||= new Map();
     if (!this.startedAt) {
       this.startedAt = new Date().toISOString();
 
@@ -258,23 +255,16 @@ export class GaugeCollector extends DurableObject {
         const current =
           this.sockets.get(key);
 
-        const lastActivity =
-          this.socketActivity.get(key) || 0;
-        const isConnecting =
-          current?.readyState === WebSocket.CONNECTING &&
-          Date.now() - lastActivity < 30000;
-        const isHealthy =
-          current?.readyState === WebSocket.OPEN &&
-          Date.now() - lastActivity < 75000;
-
-        if (isConnecting || isHealthy) {
+        if (
+          current &&
+          (
+            current.readyState ===
+              WebSocket.OPEN ||
+            current.readyState ===
+              WebSocket.CONNECTING
+          )
+        ) {
           continue;
-        }
-
-        if (current) {
-          try { current.close(1000, "stale connection"); } catch {}
-          this.sockets.delete(key);
-          this.socketActivity.delete(key);
         }
 
         this.connect(member, server, key);
@@ -282,7 +272,7 @@ export class GaugeCollector extends DurableObject {
     }
 
     await this.ctx.storage.setAlarm(
-      Date.now() + 30000
+      Date.now() + 60000
     );
   }
 
@@ -301,7 +291,6 @@ export class GaugeCollector extends DurableObject {
       const socket = new WebSocket(socketUrl);
 
       this.sockets.set(key, socket);
-      this.socketActivity.set(key, Date.now());
 
       let joined = false;
 
@@ -358,7 +347,6 @@ export class GaugeCollector extends DurableObject {
       socket.addEventListener(
         "message",
         (event) => {
-          this.socketActivity.set(key, Date.now());
           const text =
             typeof event.data === "string"
               ? event.data
@@ -395,22 +383,14 @@ export class GaugeCollector extends DurableObject {
               );
             }
 
-            this.eventQueue = this.eventQueue
-              .then(() => this.handleWeflabEvent(
+            this.ctx.waitUntil(
+              this.handleWeflabEvent(
                 member,
                 server,
                 text,
                 parsed
-              ))
-              .catch((error) => this.recordEvent({
-                member: member.name,
-                displayName: member.displayName,
-                server,
-                kind: "event-error",
-                error: String(error),
-                receivedAt: new Date().toISOString(),
-              }));
-            this.ctx.waitUntil(this.eventQueue);
+              )
+            );
           }
         }
       );
@@ -418,20 +398,14 @@ export class GaugeCollector extends DurableObject {
       socket.addEventListener(
         "close",
         () => {
-          if (this.sockets.get(key) === socket) {
-            this.sockets.delete(key);
-            this.socketActivity.delete(key);
-          }
+          this.sockets.delete(key);
         }
       );
 
       socket.addEventListener(
         "error",
         () => {
-          if (this.sockets.get(key) === socket) {
-            this.sockets.delete(key);
-            this.socketActivity.delete(key);
-          }
+          this.sockets.delete(key);
         }
       );
     } catch (error) {
