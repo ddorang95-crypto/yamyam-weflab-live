@@ -523,7 +523,8 @@ export class GaugeCollector extends DurableObject {
     const isDonation =
       payload?.type === "test_donation" ||
       payload?.type === "donation" ||
-      donationData?.type === "SENDBALLOON";
+      donationData?.type === "SENDBALLOON" ||
+      donationData?.subtype === "SENDBALLOON";
 
     if (
       isDonation &&
